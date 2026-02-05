@@ -35,7 +35,7 @@ orientation = portrait
 
 # Android Permissions
 # CAMERA = Kamera-Zugriff erforderlich!
-android.permissions = CAMERA
+android.permissions = CAMERA, INTERNET
 
 # App-Icon (optional, falls vorhanden)
 #icon.filename = %(source.dir)s/data/icon.png
@@ -52,6 +52,9 @@ android.minapi = 21
 
 # NDK Version (für native Kompilierung)
 android.ndk = 25b
+
+# (str) Filename to the hook for p4a
+p4a.hook = p4a/hook.py
 
 
 # Build-Tools

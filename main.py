@@ -1,3 +1,4 @@
+
 from kivy.app import App
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.camera import Camera
@@ -9,9 +10,10 @@ from kivy.graphics import PushMatrix, PopMatrix, Rotate
 import numpy as np
 import cv2
 import threading
+import time
 
 # Android TTS
-from jnius import autoclass
+from jnius import autoclass, PythonJavaClass, java_method
 from android.runnable import run_on_ui_thread
 
 PythonActivity = autoclass('org.kivy.android.PythonActivity')
@@ -35,42 +37,137 @@ class RotatedCamera(Camera):
         self.rot.origin = self.center
 
 
+# ---------------------------
+# Native Android TTS (stabil)
+# ---------------------------
+
+class _TTSOnInitListener(PythonJavaClass):
+    __javainterfaces__ = ['android/speech/tts/TextToSpeech$OnInitListener']
+    __javacontext__ = 'app'
+
+    def __init__(self, owner):
+        super().__init__()
+        self.owner = owner
+
+    @java_method('(I)V')
+    def onInit(self, status):
+        # Callback kann aus nicht-UI-Thread kommen -> via Kivy Clock zurück
+        def _apply(dt):
+            self.owner.is_ready = (status == TextToSpeech.SUCCESS)
+            if self.owner.is_ready and self.owner.tts:
+                # Sprache setzen (optional: Ergebnis prüfen)
+                self.owner.tts.setLanguage(Locale.GERMAN)
+                # Listener setzen (safe)
+                self.owner.tts.setOnUtteranceProgressListener(self.owner._progress_listener)
+
+                # Pending Speak nach Init (falls speak() zu früh kam)
+                if self.owner._pending_text:
+                    txt = self.owner._pending_text
+                    self.owner._pending_text = None
+                    self.owner.speak(txt)
+
+        Clock.schedule_once(_apply, 0)
+
+
+class _TTSProgressListener(PythonJavaClass):
+    # UtteranceProgressListener ist eine (abstrakte) Klasse -> __javaclass__
+    __javaclass__ = 'android/speech/tts/UtteranceProgressListener'
+    __javacontext__ = 'app'
+
+    def __init__(self, owner):
+        super().__init__()
+        self.owner = owner
+
+    @java_method('(Ljava/lang/String;)V')
+    def onStart(self, utteranceId):
+        Clock.schedule_once(lambda dt: setattr(self.owner, 'is_speaking', True), 0)
+
+    @java_method('(Ljava/lang/String;)V')
+    def onDone(self, utteranceId):
+        Clock.schedule_once(lambda dt: setattr(self.owner, 'is_speaking', False), 0)
+
+    # required abstract (deprecated in API 21, but still present)
+    @java_method('(Ljava/lang/String;)V')
+    def onError(self, utteranceId):
+        Clock.schedule_once(lambda dt: setattr(self.owner, 'is_speaking', False), 0)
+
+    # newer overload (API 21+)
+    @java_method('(Ljava/lang/String;I)V')
+    def onError__2(self, utteranceId, errorCode):
+        Clock.schedule_once(lambda dt: setattr(self.owner, 'is_speaking', False), 0)
+
+    @java_method('(Ljava/lang/String;Z)V')
+    def onStop(self, utteranceId, interrupted):
+        Clock.schedule_once(lambda dt: setattr(self.owner, 'is_speaking', False), 0)
+
+
 class AndroidTTS:
-    """Wrapper für Android TTS über pyjnius, stabil Start/Stop"""
+    """Wrapper für Android TTS über pyjnius, stabil Start/Stop + Init-Handling"""
     def __init__(self):
         self.tts = None
         self.is_ready = False
         self.is_speaking = False
+        self._pending_text = None
+
+        self._init_listener = _TTSOnInitListener(self)
+        self._progress_listener = _TTSProgressListener(self)
+
         self._init_tts()
 
     @run_on_ui_thread
     def _init_tts(self):
-        """TextToSpeech auf UI-Thread erzeugen"""
-        self.tts = TextToSpeech(PythonActivity.mActivity, None)
-        self.tts.setLanguage(Locale.GERMAN)
-        self.is_ready = True
+        # Init ist asynchron -> OnInitListener setzt is_ready
+        self.tts = TextToSpeech(PythonActivity.mActivity, self._init_listener)
 
-    def speak(self, text):
-        if not text.strip() or not self.is_ready:
+    def speak(self, text: str):
+        if not text or not text.strip():
             return
 
-        def _speak():
-            bundle = Bundle()  # muss Bundle sein, nicht None
-            self.is_speaking = True
-            self.tts.speak(text, TextToSpeech.QUEUE_FLUSH, bundle, "tts1")
+        # Wenn noch nicht bereit: merken und nach Init sprechen
+        if not self.is_ready or not self.tts:
+            self._pending_text = text
+            return
 
-        run_on_ui_thread(_speak)
+        @run_on_ui_thread
+        def _speak():
+            b = Bundle()
+            utt_id = str(int(time.time() * 1000))  # unique
+            # QUEUE_FLUSH: bricht vorherige Queue ab
+            self.tts.speak(text, TextToSpeech.QUEUE_FLUSH, b, utt_id)
+
+        _speak()
 
     def stop(self):
-        if not self.is_ready:
+        if not self.tts:
             return
 
+        @run_on_ui_thread
         def _stop():
-            if self.is_speaking:
-                self.tts.stop()
-                self.is_speaking = False
+            # Immer stoppen (nicht vom eigenen Flag abhängig)
+            self.tts.stop()
+            self.is_speaking = False
+            self._pending_text = None
 
-        run_on_ui_thread(_stop)
+        _stop()
+
+    def shutdown(self):
+        """Empfohlen, um native Ressourcen freizugeben."""
+        if not self.tts:
+            return
+
+        @run_on_ui_thread
+        def _shutdown():
+            try:
+                self.tts.stop()
+                self.tts.shutdown()
+            except Exception:
+                pass
+            self.tts = None
+            self.is_ready = False
+            self.is_speaking = False
+            self._pending_text = None
+
+        _shutdown()
 
 
 class QRScannerApp(App):
@@ -167,7 +264,8 @@ class QRScannerApp(App):
             self.start_tts()
 
     def start_tts(self):
-        text = "Das ist ein Beispiel Text. Du kannst ihn jederzeit stoppen, indem du die Stop Funktion testest. Jetzt funktioniert es stabil auf Android."
+        text = ("Das ist ein Beispiel Text. Du kannst ihn jederzeit stoppen, "
+                "indem du die Stop Funktion testest. Jetzt funktioniert es stabil auf Android.")
         if not text.strip():
             return
         self.tts_active = True
@@ -193,6 +291,13 @@ class QRScannerApp(App):
     def on_resume(self):
         if self.scanning:
             self.camera.play = True
+
+    def on_stop(self):
+        # App wird wirklich beendet -> Ressourcen freigeben
+        try:
+            self.tts.shutdown()
+        except Exception:
+            pass
 
 
 if __name__ == '__main__':
