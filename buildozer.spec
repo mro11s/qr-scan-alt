@@ -53,8 +53,6 @@ android.minapi = 21
 # NDK Version (für native Kompilierung)
 android.ndk = 25b
 
-# SDK Version
-android.sdk = 31
 
 # Build-Tools
 android.accept_sdk_license = True
