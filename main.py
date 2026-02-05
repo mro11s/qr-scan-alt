@@ -17,6 +17,7 @@ from android.runnable import run_on_ui_thread
 PythonActivity = autoclass('org.kivy.android.PythonActivity')
 TextToSpeech = autoclass('android.speech.tts.TextToSpeech')
 Locale = autoclass('java.util.Locale')
+Bundle = autoclass('android.os.Bundle')
 
 
 class RotatedCamera(Camera):
@@ -35,37 +36,48 @@ class RotatedCamera(Camera):
 
 
 class AndroidTTS:
-    """Wrapper für Android TTS über pyjnius"""
+    """Wrapper für Android TTS über pyjnius, stabil Start/Stop"""
     def __init__(self):
+        self.tts = None
+        self.is_ready = False
+        self.is_speaking = False
+        self._init_tts()
+
+    @run_on_ui_thread
+    def _init_tts(self):
+        """TextToSpeech auf UI-Thread erzeugen"""
         self.tts = TextToSpeech(PythonActivity.mActivity, None)
         self.tts.setLanguage(Locale.GERMAN)
-        self.lock = threading.Lock()
-        self.is_speaking = False
+        self.is_ready = True
 
     def speak(self, text):
-        if not text.strip():
+        if not text.strip() or not self.is_ready:
             return
 
-        def run():
-            with self.lock:
-                self.is_speaking = True
-                self.tts.speak(text, TextToSpeech.QUEUE_FLUSH, None, "tts1")
-                self.is_speaking = False
+        def _speak():
+            bundle = Bundle()  # muss Bundle sein, nicht None
+            self.is_speaking = True
+            self.tts.speak(text, TextToSpeech.QUEUE_FLUSH, bundle, "tts1")
 
-        threading.Thread(target=run, daemon=True).start()
+        run_on_ui_thread(_speak)
 
     def stop(self):
-        with self.lock:
+        if not self.is_ready:
+            return
+
+        def _stop():
             if self.is_speaking:
                 self.tts.stop()
                 self.is_speaking = False
+
+        run_on_ui_thread(_stop)
 
 
 class QRScannerApp(App):
     def build(self):
         self.layout = BoxLayout(orientation='vertical', padding=10, spacing=10)
 
-        # RotatedCamera wieder verwenden
+        # RotatedCamera verwenden
         self.camera = RotatedCamera(
             resolution=(1280, 720),
             play=False,
@@ -142,7 +154,7 @@ class QRScannerApp(App):
         mirrored = cv2.flip(img_bgr, 1)
         data, _, _ = self.qr_detector.detectAndDecode(mirrored)
         if data:
-            self.result_label.text = f'QR erkanntt:\n\n{data}'
+            self.result_label.text = f'QR erkannt:\n\n{data}'
             return
 
         self.result_label.text = 'Kein QR-Code gefunden'
@@ -155,7 +167,7 @@ class QRScannerApp(App):
             self.start_tts()
 
     def start_tts(self):
-        text = "Das ist ein Beispiel Text. Du kannst ihn jederzeit stoppen, indem du die Stop Funktion testest. Klappt anscheinend nicht."
+        text = "Das ist ein Beispiel Text. Du kannst ihn jederzeit stoppen, indem du die Stop Funktion testest. Jetzt funktioniert es stabil auf Android."
         if not text.strip():
             return
         self.tts_active = True
