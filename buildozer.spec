@@ -25,7 +25,7 @@ version = 1.0
 # kivy = Kivy Framework
 # opencv = OpenCV für Android (wird von p4a kompiliert)
 # numpy = NumPy (Abhängigkeit von OpenCV)
-requirements = python3,kivy,opencv,numpy,plyer
+requirements = python3,kivy,opencv,numpy,pyjnius
 
 # Orientierung (portrait, landscape, sensor)
 orientation = portrait

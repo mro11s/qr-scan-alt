@@ -8,7 +8,15 @@ from kivy.graphics import PushMatrix, PopMatrix, Rotate
 
 import numpy as np
 import cv2
-from plyer import tts
+import threading
+
+# Android TTS
+from jnius import autoclass
+from android.runnable import run_on_ui_thread
+
+PythonActivity = autoclass('org.kivy.android.PythonActivity')
+TextToSpeech = autoclass('android.speech.tts.TextToSpeech')
+Locale = autoclass('java.util.Locale')
 
 
 class RotatedCamera(Camera):
@@ -26,10 +34,38 @@ class RotatedCamera(Camera):
         self.rot.origin = self.center
 
 
+class AndroidTTS:
+    """Wrapper für Android TTS über pyjnius"""
+    def __init__(self):
+        self.tts = TextToSpeech(PythonActivity.mActivity, None)
+        self.tts.setLanguage(Locale.GERMAN)
+        self.lock = threading.Lock()
+        self.is_speaking = False
+
+    def speak(self, text):
+        if not text.strip():
+            return
+
+        def run():
+            with self.lock:
+                self.is_speaking = True
+                self.tts.speak(text, TextToSpeech.QUEUE_FLUSH, None, "tts1")
+                self.is_speaking = False
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def stop(self):
+        with self.lock:
+            if self.is_speaking:
+                self.tts.stop()
+                self.is_speaking = False
+
+
 class QRScannerApp(App):
     def build(self):
         self.layout = BoxLayout(orientation='vertical', padding=10, spacing=10)
 
+        # RotatedCamera wieder verwenden
         self.camera = RotatedCamera(
             resolution=(1280, 720),
             play=False,
@@ -39,8 +75,8 @@ class QRScannerApp(App):
 
         self.qr_detector = cv2.QRCodeDetector()
         self.scanning = False
+        self.tts = AndroidTTS()
         self.tts_active = False
-        self.tts_event = None
 
         self.result_label = Label(
             text='Scanner bereit',
@@ -60,7 +96,7 @@ class QRScannerApp(App):
         self.toggle_button.bind(on_press=self.toggle_scanner)
         buttons.add_widget(self.toggle_button)
 
-        self.tts_button = Button(text='🔊 Vorlesen')
+        self.tts_button = Button(text='Vorlesen')
         self.tts_button.bind(on_press=self.toggle_tts)
         buttons.add_widget(self.tts_button)
 
@@ -72,7 +108,6 @@ class QRScannerApp(App):
         return self.layout
 
     # ---------------- Scanner ----------------
-
     def toggle_scanner(self, instance):
         if self.scanning:
             self.scanning = False
@@ -97,21 +132,22 @@ class QRScannerApp(App):
 
         img_bgr = cv2.cvtColor(img, cv2.COLOR_RGBA2BGR)
 
+        # Original prüfen
         data, _, _ = self.qr_detector.detectAndDecode(img_bgr)
         if data:
             self.result_label.text = f'QR erkannt:\n\n{data}'
             return
 
+        # Gespiegelt prüfen
         mirrored = cv2.flip(img_bgr, 1)
         data, _, _ = self.qr_detector.detectAndDecode(mirrored)
         if data:
-            self.result_label.text = f'QR erkannt (gespiegelt):\n\n{data}'
+            self.result_label.text = f'QR erkanntt:\n\n{data}'
             return
 
         self.result_label.text = 'Kein QR-Code gefunden'
 
     # ---------------- TTS ----------------
-
     def toggle_tts(self, instance):
         if self.tts_active:
             self.stop_tts()
@@ -119,33 +155,19 @@ class QRScannerApp(App):
             self.start_tts()
 
     def start_tts(self):
-        text = self.result_label.text
+        text = "Das ist ein Beispiel Text. Du kannst ihn jederzeit stoppen, indem du die Stop Funktion testest. Klappt anscheinend nicht."
         if not text.strip():
             return
-
         self.tts_active = True
-        self.tts_button.text = '⏹️ Stopp'
+        self.tts_button.text = 'Stopp'
+        self.tts.speak(text)
 
-        tts.speak(text)
-
-        # ⏱️ automatisch nach 5 Sekunden stoppen
-        self.tts_event = Clock.schedule_once(self.stop_tts, 5)
-
-    def stop_tts(self, *args):
-        try:
-            tts.stop()
-        except Exception:
-            pass
-
-        if self.tts_event:
-            self.tts_event.cancel()
-            self.tts_event = None
-
+    def stop_tts(self):
+        self.tts.stop()
         self.tts_active = False
-        self.tts_button.text = '🔊 Vorlesen'
+        self.tts_button.text = 'Vorlesen'
 
     # ---------------- Misc ----------------
-
     def clear_result(self, instance):
         self.result_label.text = 'Ergebnis gelöscht'
         self.stop_tts()
